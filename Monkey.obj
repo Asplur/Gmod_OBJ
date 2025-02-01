@@ -1,7 +1,7 @@
 # Blender 4.3.2
 # www.blender.org
 mtllib Monkey.mtl
-o 18545_Mid-Size_Car_from_1960s_v1
+o Car
 v 0.517057 3.186033 9.594906
 v 0.504443 3.442397 8.700322
 v 0.540768 3.265660 9.261201
