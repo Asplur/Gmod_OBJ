@@ -1,7 +1,7 @@
 # Blender 4.3.2
 # www.blender.org
 mtllib Monkey.mtl
-o Plane.008
+o House
 v 2.408768 7.599999 1.000000
 v 2.408768 7.599999 0.800000
 v 3.408768 7.599999 0.800000
