@@ -1,0 +1,469 @@
+--@name Cookie Clicker (Scaled UI with Save/Load Buttons)
+--@author Your Name
+--@shared
+
+if SERVER then
+    -- Table to store each player's game state
+    local playerGameStates = {}
+
+    -- Function to initialize a new game state for a player
+    local function initializeGameState(ply)
+        playerGameStates[ply] = {
+            Money = 0.0,
+            Money_Per_Second = 1.0,
+            Upgrade_Cost = 10.0,
+            Upgrade_Multiplier = 1.05,
+            Cost_Multiplier = 1.02
+        }
+    end
+
+    -- Initialize a new game state when a player joins
+    hook.add("PlayerConnected", "initializePlayerGameState", function(ply)
+        initializeGameState(ply)
+    end)
+
+    -- Clean up a player's game state when they leave
+    hook.add("PlayerDisconnected", "cleanupPlayerGameState", function(ply)
+        playerGameStates[ply] = nil
+    end)
+
+    -- Net message to send a player's game state to the client
+    net.receive("RequestGameState", function(len, ply)
+        net.start("SendGameState")
+        net.writeTable(playerGameStates[ply] or {})
+        net.send(ply)
+    end)
+
+    -- Net message to update a player's game state from the client
+    net.receive("UpdateGameState", function(len, ply)
+        local gameState = net.readTable()
+        playerGameStates[ply] = gameState
+    end)
+
+    -- Net message to handle save requests from clients
+    net.receive("SaveStats", function(len, ply)
+        net.start("SaveStats")
+        net.writeString(ply:getSteamID()) -- Send the player's SteamID
+        net.writeTable(net.readTable()) -- Forward the game state data
+        net.send(owner()) -- Send to the owner client
+    end)
+
+    -- Net message to handle load requests from clients
+    net.receive("LoadStats", function(len, ply)
+        net.start("LoadStats")
+        net.writeString(ply:getSteamID()) -- Send the player's SteamID
+        net.send(owner()) -- Send to the owner client
+    end)
+
+    -- Net message to send loaded stats back to the requesting client
+    net.receive("SendLoadedStats", function(len, ply)
+        local plyID = net.readString()
+        local data = net.readTable()
+
+        net.start("SendLoadedStats")
+        net.writeString(plyID)
+        net.writeTable(data)
+        net.send(find.playerBySteamID(plyID)) -- Send to the requesting client
+    end)
+    return
+end
+
+if player() == owner() then
+    local allData = {}
+
+    -- Net message to handle save requests from the server
+    net.receive("SaveStats", function()
+        local plyID = net.readString()
+        local data = net.readTable()
+
+        -- Update the player's data
+        allData[plyID] = data
+
+        -- Save to file (owner client only)
+        file.write("stats.txt", json.encode(allData))
+        print("Game state saved for player: " .. plyID)
+    end)
+
+    -- Net message to handle load requests from the server
+    net.receive("LoadStats", function()
+        local plyID = net.readString()
+
+        -- Load from file
+        local fileContents = file.read("stats.txt")
+        if fileContents then
+            local success, loadedData = pcall(json.decode, fileContents)
+            if success and loadedData then
+                allData = loadedData
+                local playerData = allData[plyID] or {}
+
+                -- Send the loaded data back to the server
+                net.start("SendLoadedStats")
+                net.writeString(plyID)
+                net.writeTable(playerData) -- Ensure this is a table
+                net.send()
+                print("Game state loaded for player: " .. plyID)
+            else
+                print("Failed to load game state for player: " .. plyID)
+            end
+        else
+            print("No save file found for player: " .. plyID)
+        end
+    end)
+end
+
+if CLIENT then
+    -- Define the required permissions
+    local requiredPermissions = {
+        "file.read",
+        "file.write"
+    }
+
+    -- Permission handling logic
+    permissions = permissions or {}
+    permissionSatisfied = permissionSatisfied or false
+    permissionRequestSent = false
+
+    -- Function to check if the player has the required permissions
+    local function checkPermissions(default)
+        local isSatisfied = true
+        default = default == nil or default
+
+        for _, permission in pairs(permissions) do
+            local doBreak
+
+            local succeeded = pcall(function()
+                if not hasPermission(permission) then
+                    isSatisfied = false
+                    doBreak = true
+                end
+            end)
+
+            if not succeeded then
+                isSatisfied = default
+                doBreak = not default
+            end
+
+            if doBreak then break end
+        end
+
+        permissionSatisfied = isSatisfied
+        return permissionSatisfied
+    end
+
+    -- Function to add a permission to the list
+    local function addPermission(permission)
+        if not permission then return end
+
+        if not table.hasValue(permissions, permission) then
+            table.insert(permissions, permission)
+        end
+    end
+
+    -- Function to add multiple permissions
+    local function addPermissions(perms)
+        if not perms then return end
+
+        for _, perm in ipairs(perms) do
+            addPermission(perm)
+        end
+    end
+
+    -- Safely set up the permission request
+    local function setupPermissionRequestSafe(perms, str, popup)
+        local success, err = pcall(setupPermissionRequest, perms, str, popup)
+
+        if success then return end
+
+        if type(err) == "table" then
+            err = err.message
+        end
+
+        local perm = string.explode("Invalid permission name: ", err)[2]
+
+        local newPerms = {}
+        local newCount = 0
+
+        for _, oldPerm in ipairs(perms) do
+            if oldPerm ~= perm then
+                newCount = newCount + 1
+                newPerms[newCount] = oldPerm
+            end
+        end
+
+        return setupPermissionRequestSafe(newPerms, str, popup)
+    end
+
+    -- Override sendPermissionRequest to handle permission requests
+    _sendPermissionRequest = _sendPermissionRequest or sendPermissionRequest
+
+    local function sendPermissionRequest()
+        if permissionRequestSent then return end
+
+        -- Ensure the player is connected to the HUD before sending the request
+        if not render.isHUDActive() then
+            print("Please interact with the screen or chip to connect to the HUD.")
+            return
+        end
+
+        _sendPermissionRequest()
+        permissionRequestSent = true
+    end
+
+    -- Hook to handle permission requests
+    hook.add("permissionrequest", "LKL_CheckPerms_PermissionRequest", function()
+        checkPermissions()
+    end)
+
+    -- Add required permissions
+    addPermissions(requiredPermissions)
+
+    -- Set up the permission request
+    setupPermissionRequestSafe(requiredPermissions, "This chip needs permission to read and write files to save and load your game progress.", true)
+
+    -- Check permissions when the script starts
+    checkPermissions()
+
+    -- Rest of the Cookie Clicker logic
+    local buttonPressed = false
+    local upgradeButtonPressed = false
+    local saveButtonPressed = false
+    local loadButtonPressed = false
+    local buttonSize = Vector(100, 50, 0)
+    local buttonPos = Vector(512 / 2 - buttonSize.x / 2, 512 / 2 - buttonSize.y / 2, 0)
+    local upgradeButtonPos = Vector(512 / 2 - buttonSize.x / 2, 512 / 2 + 100, 0)
+    local saveButtonPos = Vector(512 / 2 - buttonSize.x / 2, 512 / 2 + 200, 0)
+    local loadButtonPos = Vector(512 / 2 - buttonSize.x / 2, 512 / 2 + 300, 0)
+    local screenEnt
+
+    -- Default variables (will be overwritten by server data)
+    local Money = 0.0
+    local Money_Per_Second = 1.0
+    local Upgrade_Cost = 10.0
+    local Upgrade_Multiplier = 1.05
+    local Cost_Multiplier = 1.02
+
+    -- Function to request the game state from the server
+    local function requestGameState()
+        net.start("RequestGameState")
+        net.send()
+    end
+
+    -- Function to update the game state on the server
+    local function updateGameState()
+        local gameState = {
+            Money = Money,
+            Money_Per_Second = Money_Per_Second,
+            Upgrade_Cost = Upgrade_Cost,
+            Upgrade_Multiplier = Upgrade_Multiplier,
+            Cost_Multiplier = Cost_Multiplier
+        }
+        net.start("UpdateGameState")
+        net.writeTable(gameState)
+        net.send()
+    end
+
+    -- Net message to receive the game state from the server
+    net.receive("SendGameState", function()
+        local gameState = net.readTable()
+        Money = gameState.Money or Money
+        Money_Per_Second = gameState.Money_Per_Second or Money_Per_Second
+        Upgrade_Cost = gameState.Upgrade_Cost or Upgrade_Cost
+        Upgrade_Multiplier = gameState.Upgrade_Multiplier or Upgrade_Multiplier
+        Cost_Multiplier = gameState.Cost_Multiplier or Cost_Multiplier
+    end)
+
+    -- Request the game state when the script starts
+    requestGameState()
+
+    -- Function to check if the cursor is inside a button
+    local function isCursorInButton(localposx, localposy, buttonPos, buttonSize)
+        return localposx >= buttonPos.x and localposx <= buttonPos.x + buttonSize.x and
+               localposy >= buttonPos.y and localposy <= buttonPos.y + buttonSize.y
+    end
+
+    -- Function to scale a position or size based on the screen resolution
+    local function scaleToScreen(value, referenceResolution, currentResolution)
+        return value * (currentResolution / referenceResolution)
+    end
+
+    -- Function to save game state
+    local function saveGameState()
+        local gameState = {
+            Money = Money,
+            Money_Per_Second = Money_Per_Second,
+            Upgrade_Cost = Upgrade_Cost,
+            Upgrade_Multiplier = Upgrade_Multiplier,
+            Cost_Multiplier = Cost_Multiplier
+        }
+
+        -- Send the game state to the server
+        net.start("SaveStats")
+        net.writeTable(gameState)
+        net.send()
+    end
+
+    -- Function to load game state
+    local function loadGameState()
+        -- Request the game state from the server
+        net.start("LoadStats")
+        net.send()
+    end
+
+    -- Net message to receive loaded stats from the server
+    net.receive("SendLoadedStats", function()
+        local plyID = net.readString()
+        local data = net.readTable()
+
+        -- Ensure data is a table before updating the game state
+        if type(data) == "table" then
+            Money = data.Money or Money
+            Money_Per_Second = data.Money_Per_Second or Money_Per_Second
+            Upgrade_Cost = data.Upgrade_Cost or Upgrade_Cost
+            Upgrade_Multiplier = data.Upgrade_Multiplier or Upgrade_Multiplier
+            Cost_Multiplier = data.Cost_Multiplier or Cost_Multiplier
+            print("Game state loaded for player: " .. plyID)
+        else
+            print("Invalid data received for player: " .. plyID)
+        end
+    end)
+
+    -- Timer to send net messages every 0.4 seconds
+    local lastNetUpdate = 0
+    hook.add("think", "throttleNetMessages", function()
+        local currentTime = timer.curtime()
+        if currentTime - lastNetUpdate >= 0.4 then
+            updateGameState() -- Send the game state to the server
+            lastNetUpdate = currentTime
+        end
+    end)
+
+    -- Hook to draw the buttons and handle interactions
+    hook.add("render", "drawButtons", function()
+        -- Get the screen entity if it hasn't been set yet
+        screenEnt = screenEnt or render.getScreenEntity()
+
+        -- Get the screen resolution
+        local screenWidth, screenHeight = render.getResolution(screenEnt)
+        local referenceResolution = 1024 -- Reference resolution (1024x1024)
+
+        -- Scale the button size and positions
+        local scaledButtonSize = Vector(
+            scaleToScreen(buttonSize.x, referenceResolution, screenWidth),
+            scaleToScreen(buttonSize.y, referenceResolution, screenHeight),
+            0
+        )
+
+        local scaledButtonPos = Vector(
+            scaleToScreen(buttonPos.x, referenceResolution, screenWidth),
+            scaleToScreen(buttonPos.y, referenceResolution, screenHeight),
+            0
+        )
+
+        local scaledUpgradeButtonPos = Vector(
+            scaleToScreen(upgradeButtonPos.x, referenceResolution, screenWidth),
+            scaleToScreen(upgradeButtonPos.y, referenceResolution, screenHeight),
+            0
+        )
+
+        local scaledSaveButtonPos = Vector(
+            scaleToScreen(saveButtonPos.x + 500, referenceResolution, screenWidth),
+            scaleToScreen(saveButtonPos.y, referenceResolution, screenHeight),
+            0
+        )
+
+        local scaledLoadButtonPos = Vector(
+            scaleToScreen(loadButtonPos.x + 500, referenceResolution, screenWidth),
+            scaleToScreen(loadButtonPos.y, referenceResolution, screenHeight),
+            0
+        )
+
+        -- Get the mouse position relative to the screen
+        local localposx, localposy = render.cursorPos(player(), screenEnt)
+
+        -- Draw the money display
+        render.setColor(Color(255, 255, 255, 255)) -- White color
+        render.setFont("DermaLarge")
+        render.drawText(10, 10, "Money: " .. string.format("%.2f", Money), TEXT_ALIGN.LEFT)
+        render.drawText(10, 40, "MPS: " .. string.format("%.2f", Money_Per_Second), TEXT_ALIGN.LEFT)
+        render.drawText(10, 70, "Upgrade Cost: " .. string.format("%.2f", Upgrade_Cost), TEXT_ALIGN.LEFT)
+        render.drawText(10, 250, "Upgrade Multiplier: " .. string.format("%.2f", Upgrade_Multiplier), TEXT_ALIGN.LEFT)
+        render.drawText(10, 300, "Cost Multiplier: " .. string.format("%.2f", Cost_Multiplier), TEXT_ALIGN.LEFT)
+
+        -- Draw the "Click Me" button
+        render.setColor(Color(50, 50, 200, 255)) -- Blue color
+        render.drawRect(scaledButtonPos.x, scaledButtonPos.y, scaledButtonSize.x, scaledButtonSize.y)
+        render.setColor(Color(255, 255, 255, 255)) -- White color
+        render.drawText(scaledButtonPos.x + scaledButtonSize.x / 2, scaledButtonPos.y + scaledButtonSize.y / 2, "Click Me", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        -- Draw the "Upgrade" button
+        if Money >= Upgrade_Cost then
+            render.setColor(Color(50, 200, 50, 255)) -- Green color if affordable
+        else
+            render.setColor(Color(200, 50, 50, 255)) -- Red color if not affordable
+        end
+        render.drawRect(scaledUpgradeButtonPos.x, scaledUpgradeButtonPos.y, scaledButtonSize.x, scaledButtonSize.y)
+        render.setColor(Color(255, 255, 255, 255)) -- White color
+        render.drawText(scaledUpgradeButtonPos.x + scaledButtonSize.x / 2, scaledUpgradeButtonPos.y + scaledButtonSize.y / 2, "Upgrade", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        -- Draw the "Save" button
+        render.setColor(Color(200, 200, 50, 255)) -- Yellow color
+        render.drawRect(scaledSaveButtonPos.x, scaledSaveButtonPos.y, scaledButtonSize.x, scaledButtonSize.y)
+        render.setColor(Color(255, 255, 255, 255)) -- White color
+        render.drawText(scaledSaveButtonPos.x + scaledButtonSize.x / 2, scaledSaveButtonPos.y + scaledButtonSize.y / 2, "Save", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        -- Draw the "Load" button
+        render.setColor(Color(50, 200, 200, 255)) -- Cyan color
+        render.drawRect(scaledLoadButtonPos.x, scaledLoadButtonPos.y, scaledButtonSize.x, scaledButtonSize.y)
+        render.setColor(Color(255, 255, 255, 255)) -- White color
+        render.drawText(scaledLoadButtonPos.x + scaledButtonSize.x / 2, scaledLoadButtonPos.y + scaledButtonSize.y / 2, "Load", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        -- Check for "Click Me" button click
+        if localposx and localposy then
+            if (input.isKeyDown(15) or input.isMouseDown(MOUSE.MOUSE1)) and isCursorInButton(localposx, localposy, scaledButtonPos, scaledButtonSize) then
+                if not buttonPressed then
+                    buttonPressed = true
+                    Money = Money + 1 -- Increase money by 1 per click
+                end
+            else
+                buttonPressed = false
+            end
+
+            -- Check for "Upgrade" button click
+            if (input.isKeyDown(15) or input.isMouseDown(MOUSE.MOUSE1)) and isCursorInButton(localposx, localposy, scaledUpgradeButtonPos, scaledButtonSize) then
+                if not upgradeButtonPressed and Money >= Upgrade_Cost then
+                    upgradeButtonPressed = true
+                    Money = Money - Upgrade_Cost -- Deduct upgrade cost
+                    Money_Per_Second = Money_Per_Second * Upgrade_Multiplier -- Increase MPS
+                    Upgrade_Cost = Upgrade_Cost * Cost_Multiplier -- Increase upgrade cost
+                end
+            else
+                upgradeButtonPressed = false
+            end
+
+            -- Check for "Save" button click
+            if (input.isKeyDown(15) or input.isMouseDown(MOUSE.MOUSE1)) and isCursorInButton(localposx, localposy, scaledSaveButtonPos, scaledButtonSize) then
+                if not saveButtonPressed then
+                    saveButtonPressed = true
+                    saveGameState() -- Save the game state
+                end
+            else
+                saveButtonPressed = false
+            end
+
+            -- Check for "Load" button click
+            if (input.isKeyDown(15) or input.isMouseDown(MOUSE.MOUSE1)) and isCursorInButton(localposx, localposy, scaledLoadButtonPos, scaledButtonSize) then
+                if not loadButtonPressed then
+                    loadButtonPressed = true
+                    loadGameState() -- Load the game state
+                end
+            else
+                loadButtonPressed = false
+            end
+        end
+    end)
+
+    -- Hook to add Money Per Second (MPS) to Money every second
+    timer.create("addMPS", 1, 0, function()
+        Money = Money + Money_Per_Second
+    end)
+end
