@@ -1,7 +1,7 @@
 # Blender 4.4.3
 # www.blender.org
 mtllib Taxi.mtl
-o taxi_mat_1-car_glass.jpg_0
+o taxi
 v 0.386667 0.095440 0.568668
 v 0.388333 0.091938 0.428356
 v 0.340189 0.185209 0.421689
