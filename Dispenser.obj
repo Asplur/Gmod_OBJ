@@ -1,7 +1,7 @@
 # Blender 4.5.3 LTS
 # www.blender.org
 mtllib Dispenser.mtl
-o Cylinder.001
+o Cylinder
 v -7.745090 12.523664 -0.999999
 v -7.745090 12.523664 1.000001
 v -7.573330 12.506748 -0.999999
