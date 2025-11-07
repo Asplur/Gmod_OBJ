@@ -1,0 +1,67 @@
+--@name Bendy
+--@author Asplur
+--@server
+
+local Holo = {}
+local Count = 20
+local Bend = 1
+local Speed = 10
+local Model = "models/props_combine/breenchair.mdl"
+local Scale = 1
+local Anim = 6
+local Bounce = 1
+local clippingInitialized = false
+local lastPos, lastRot = {}, {}
+
+local test = holograms.create(chip():getPos(), Angle(0,0,0), Model, Vector(Scale))
+local mins, maxs = test:obbMins(), test:obbMaxs()
+local height = (maxs.z - mins.z) * Scale
+local baseZ = mins.z * Scale
+test:remove()
+
+local basePos = chip():getPos() - Vector(0, 0, baseZ)
+
+for i=1,Count do 
+    Holo[i] = holograms.create(basePos, Angle(0,0,0), Model, Vector(Scale)) 
+end
+
+timer.create("Better Think", 0.1, 0, function()
+    local time = os.clock()
+    local sin, cos = math.sin(time * Speed), math.cos(time * Speed)
+    local cos2 = math.cos(time * Speed * 2) / 2
+    
+    local pos = basePos
+    local rot = Angle(0,0,0)
+    
+    for i=1,Count do
+        local prog = (i-1)/Count
+        local segRot = Anim==6 and Angle(prog*Bend*cos2,prog*Bend*sin,prog*Bend*sin) or
+                      Angle(prog*Bend*cos,prog*Bend*sin,prog*Bend*sin)
+        
+        rot = rot + segRot
+        
+        local off = Vector(0,0,(height/Count) * -0.1)
+        off:rotate(rot)
+        pos = pos + off + (Bounce==1 and Vector(0,0,prog*Bend*cos2*Scale/4) or Vector(0,0,0))
+        
+        if not lastPos[i] or pos:getDistance(lastPos[i]) > 0.1 then
+            Holo[i]:setPos(pos)
+            lastPos[i] = pos
+        end
+        
+        if not lastRot[i] or rot:getForward():getDistance(lastRot[i]:getForward()) > 0.005 then
+            Holo[i]:setAngles(rot)
+            lastRot[i] = rot
+        end
+        
+        if not clippingInitialized then
+            local botZ = baseZ + prog * height
+            local topZ = baseZ + (prog + 1/Count) * height
+            
+            Holo[i]:setClip(1, true, Vector(0,0,botZ), Vector(0,0,1), Holo[i])
+            Holo[i]:setClip(2, true, Vector(0,0,topZ), Vector(0,0,-1), Holo[i])
+        end
+    end
+    
+    clippingInitialized = true
+end)
