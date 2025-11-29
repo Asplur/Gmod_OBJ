@@ -1,0 +1,473 @@
+--@name Prop Resizer V2
+--@author PurpleSleigh / Asplur
+--@shared
+
+-- Configuration
+local Config = {
+    SIZE = Vector(0.2),
+    MAX_CVX = 10,
+    COOLDOWN_TIME = 0.3,
+    NETWORK_DELAY = 0.1,
+    CLEANUP_DELAY = 1,
+    MESH_APPLY_DELAY = 0.2
+}
+
+-- Shared State
+local State = {
+    allProps = {},
+    undoStack = {},
+    lastUseTime = 0
+}
+
+if SERVER then
+    -- Server-specific State
+    local ServerState = {}
+
+    --[[
+        Initialization Functions
+    ]]
+    local function initialize()
+        concmd("gm_giveswep laserpointer")
+        print("Prop Resizer V2 initialized")
+    end
+
+    --[[
+        Validation Functions
+    ]]
+    local function isValidUse(ply, key)
+        return ply == owner() and 
+               key == IN_KEY.ATTACK2 and 
+               owner():getActiveWeapon():getClass() == "laserpointer"
+    end
+
+    local function isInCooldown()
+        local currentTime = timer.curtime()
+        if currentTime - State.lastUseTime < Config.COOLDOWN_TIME then
+            return true
+        end
+        State.lastUseTime = currentTime
+        return false
+    end
+
+    local function validateTarget(trace)
+        return trace.Hit and trace.Entity:isValid()
+    end
+
+    --[[
+        Physics Processing Functions
+    ]]
+    local function processConvexes(cvxs)
+        for k, v in ipairs(cvxs) do
+            local _, hull = mesh.findConvexHull(v)
+            cvxs[k] = hull
+            for t, vert in ipairs(hull) do
+                cvxs[k][t] = cvxs[k][t] * Config.SIZE
+            end
+        end
+        return cvxs
+    end
+
+    local function createChunks(cvxs)
+        local chunks = {}
+        for i = 1, #cvxs, Config.MAX_CVX do
+            local chunk = {}
+            for j = i, math.min((i + Config.MAX_CVX) - 1, #cvxs) do
+                table.insert(chunk, cvxs[j])
+            end
+            table.insert(chunks, chunk)
+        end
+        return chunks
+    end
+
+    --[[
+        Position Calculation Functions
+    ]]
+    local function calculateSpawnPosition(orig, pos, ang)
+        -- Get the original object's bounds and center
+        local origBounds = orig:obbSize()
+        local origCenter = orig:obbCenter()
+        
+        -- Calculate scaled bounds and center
+        local scaledBounds = origBounds * Config.SIZE
+        local scaledCenter = origCenter * Config.SIZE
+        
+        -- Calculate the bottom of the original object (relative to its center)
+        local origBottomOffset = Vector(0, 0, -origBounds.z / 2)
+        
+        -- Calculate where the bottom should be after scaling
+        local scaledBottomOffset = origBottomOffset * Config.SIZE
+        
+        -- The spawn position should place the scaled object's bottom at the same world position
+        -- as the original object's bottom
+        local spawnPos = pos + origBottomOffset - scaledBottomOffset
+        
+        -- Add a small offset to prevent spawning inside the ground
+        spawnPos = spawnPos + Vector(0, 0, 1)
+        
+        return spawnPos, scaledBounds
+    end
+
+    --[[
+        Prop Creation Functions
+    ]]
+    local function createResizedProps(chunks, orig, spawnPos)
+        local main = nil
+        local childs = {}
+
+        for idx, chunk in ipairs(chunks) do
+            local ent = prop.createCustom(spawnPos, Angle(), chunk, true)
+            if not ent:isValid() then
+                print("Failed to create prop chunk " .. idx)
+                continue
+            end
+            
+            ent:setMass((orig:getMass() * Config.SIZE:getLength()) / #chunks)
+            
+            if idx == 1 then
+                main = ent
+            else
+                table.insert(childs, ent)
+                if main and main:isValid() then
+                    ent:setParent(main)
+                end
+            end
+        end
+
+        return main, childs
+    end
+
+    --[[
+        Data Management Functions
+    ]]
+    local function createUndoData(main, childs, orig, pos, ang)
+        return {
+            main = main,
+            childs = childs,
+            orig = orig,
+            origPos = pos,
+            origAng = ang,
+            origFrozen = orig:isFrozen(),
+            origNoDraw = false
+        }
+    end
+
+    local function storeUndoData(undoData)
+        table.insert(State.allProps, undoData)
+        table.insert(State.undoStack, undoData)
+    end
+
+    --[[
+        Material & Model Functions
+    ]]
+    local function getMaterialInfo(orig)
+        local model = orig:getModel() or "models/error.mdl"
+        local mats = orig:getMaterials()
+        local matPath = "models/debug/debugwhite"
+        
+        if mats and mats[orig:getSkin() + 1] then
+            matPath = mats[orig:getSkin() + 1]
+        end
+
+        return model, matPath
+    end
+
+    --[[
+        Network Functions
+    ]]
+    local function sendToClients(main, childs, model, matPath)
+        timer.simple(Config.NETWORK_DELAY, function()
+            if not main:isValid() then return end
+            
+            local validChilds = {}
+            for _, child in ipairs(childs) do
+                if child and child:isValid() then
+                    table.insert(validChilds, child)
+                end
+            end
+            
+            net.start("send_ENT")
+            net.writeEntity(main)
+            net.writeString(model)
+            net.writeString(matPath)
+            net.writeUInt(#validChilds, 8)
+            for _, child in ipairs(validChilds) do
+                net.writeEntity(child)
+            end
+            net.send()
+        end)
+    end
+
+    --[[
+        Cleanup Functions
+    ]]
+    local function performCleanup(main, orig)
+        timer.simple(Config.CLEANUP_DELAY, function()
+            if main and main:isValid() then 
+                constraint.breakAll(main) 
+            end
+            
+            if orig and orig:isValid() then 
+                constraint.breakAll(orig)
+                orig:setNoDraw(true)
+                orig:setFrozen(true)
+                orig:setPos(orig:getPos() + Vector(0, 0, 500))
+            end
+        end)
+    end
+
+    local function cleanupAllProps()
+        for _, propData in ipairs(State.allProps) do
+            if propData.orig and propData.orig:isValid() then
+                propData.orig:remove()
+            end
+            if propData.main and propData.main:isValid() then
+                propData.main:remove()
+            end
+            for _, child in ipairs(propData.childs) do
+                if child and child:isValid() then
+                    child:remove()
+                end
+            end
+        end
+    end
+
+    --[[
+        Undo Functions
+    ]]
+    local function performUndo()
+        if #State.undoStack == 0 then 
+            print("Nothing to undo")
+            return 
+        end
+        
+        local lastAction = table.remove(State.undoStack)
+        
+        -- Remove new props
+        if lastAction.main and lastAction.main:isValid() then
+            lastAction.main:remove()
+        end
+        for _, child in ipairs(lastAction.childs) do
+            if child and child:isValid() then
+                child:remove()
+            end
+        end
+        
+        -- Restore original prop
+        if lastAction.orig and lastAction.orig:isValid() then
+            lastAction.orig:setPos(lastAction.origPos)
+            lastAction.orig:setAngles(lastAction.origAng)
+            lastAction.orig:setNoDraw(lastAction.origNoDraw)
+            lastAction.orig:setFrozen(lastAction.origFrozen)
+            
+            -- Remove from allProps
+            for i, propData in ipairs(State.allProps) do
+                if propData.orig == lastAction.orig then
+                    table.remove(State.allProps, i)
+                    break
+                end
+            end
+        end
+        
+        print("Undo performed")
+    end
+
+    --[[
+        Main Resize Function
+    ]]
+    local function resizeProp()
+        local trace = owner():getEyeTrace()
+        if not validateTarget(trace) then return end
+        
+        local orig = trace.Entity
+        local pos = orig:getPos()
+        local ang = orig:getAngles()
+        orig:setFrozen(true)
+        
+        local physObj = orig:getPhysicsObject()
+        if not physObj:isValid() then return end
+        
+        local cvxs = physObj:getMeshConvexes()
+        if not cvxs or #cvxs == 0 then return end
+        
+        -- Process physics data
+        cvxs = processConvexes(cvxs)
+        local chunks = createChunks(cvxs)
+        
+        -- Calculate proper spawn position
+        local spawnPos, scaledBounds = calculateSpawnPosition(orig, pos, ang)
+        
+        -- Create new props
+        local main, childs = createResizedProps(chunks, orig, spawnPos)
+        if not main or not main:isValid() then
+            print("Failed to create main prop")
+            return
+        end
+
+        -- Store undo data
+        local undoData = createUndoData(main, childs, orig, pos, ang)
+        storeUndoData(undoData)
+
+        -- Get material info and send to clients
+        local model, matPath = getMaterialInfo(orig)
+        sendToClients(main, childs, model, matPath)
+
+        -- Schedule cleanup
+        performCleanup(main, orig)
+
+        print("Prop resized successfully")
+        print("Original bounds: " .. tostring(orig:obbSize()))
+        print("Scaled bounds: " .. tostring(scaledBounds))
+        print("Spawn position: " .. tostring(spawnPos))
+    end
+
+    --[[
+        Event Handlers
+    ]]
+    hook.add("KeyPress", "", function(ply, key)
+        if not isValidUse(ply, key) then return end
+        if isInCooldown() then return end
+        
+        resizeProp()
+    end)
+
+    net.receive("Undo", performUndo)
+    hook.add("Removed", "", cleanupAllProps)
+
+    -- Initialize
+    initialize()
+
+else -- CLIENT
+    --[[
+        Client Material Functions
+    ]]
+    local function createMaterial(matPath)
+        local mat = material.create("VertexLitGeneric")
+        local ok, loadMat = pcall(material.load, matPath)
+        
+        if ok and loadMat then
+            mat:setInt("$flags", loadMat:getInt("$flags") or 0)
+        end
+        
+        local baseTex = material.getTexture(matPath, "$basetexture")
+        mat:setTexture("$basetexture", baseTex or material.getTexture("models/debug/debugwhite", "$basetexture"))
+        
+        local surfProp = material.getTexture(matPath, "$surfaceprop")
+        if surfProp then
+            mat:setTexture("$surfaceprop", surfProp)
+        end
+        
+        local bumpMap = material.getTexture(matPath, "$bumpmap")
+        if bumpMap then
+            mat:setTexture("$bumpmap", bumpMap)
+        end
+        
+        return mat
+    end
+
+    --[[
+        Mesh Processing Functions
+    ]]
+    local function processMeshTriangles(meshInfo, start, endT)
+        local meshTris = {}
+        for i = start, endT do
+            if meshInfo[1].triangles[i] then
+                local tri = table.copy(meshInfo[1].triangles[i])
+                tri.weights = nil
+                tri.pos = (tri.pos * Config.SIZE):getRotated(Angle(0, 0, 0))
+                table.insert(meshTris, tri)
+            end
+        end
+        return meshTris
+    end
+
+    local function distributeTriangles(validEnts, meshInfo)
+        local totalTris = #meshInfo[1].triangles
+        local trisPerEnt = math.floor(totalTris / #validEnts)
+        trisPerEnt = trisPerEnt - (trisPerEnt % 3) -- Ensure divisible by 3
+        
+        return totalTris, trisPerEnt
+    end
+
+    local function applyMeshToEntity(ent, start, endT, meshInfo, mat)
+        if not ent:isValid() then return end
+        
+        -- Ensure triangle count is divisible by 3
+        local numTris = endT - start + 1
+        if (numTris % 3) ~= 0 then
+            endT = endT - (numTris % 3)
+        end
+        
+        if start > endT then return end
+        
+        local meshTris = processMeshTriangles(meshInfo, start, endT)
+        
+        if #meshTris > 0 and (#meshTris % 3) == 0 then
+            local verts = mesh.createFromTable(meshTris, false)
+            if verts then
+                ent:setMesh(verts)
+                ent:setMeshMaterial(mat)
+            end
+        end
+    end
+
+    --[[
+        Main Client Application Function
+    ]]
+    local function applyMeshesToEntities(main, childs, model, matPath)
+        -- Re-check entity validity after delay
+        if not main:isValid() then return end
+        
+        local validEnts = {main}
+        for _, child in ipairs(childs) do
+            if child:isValid() then
+                table.insert(validEnts, child)
+            end
+        end
+        
+        if #validEnts == 0 then return end
+        
+        local meshInfo = mesh.getModelMeshes(model)
+        if not meshInfo or #meshInfo == 0 or not meshInfo[1].triangles then return end
+        
+        -- Create material once
+        local mat = createMaterial(matPath)
+        local totalTris, trisPerEnt = distributeTriangles(validEnts, meshInfo)
+        
+        -- Apply meshes to each entity
+        for idx, ent in ipairs(validEnts) do
+            local start = ((idx - 1) * trisPerEnt) + 1
+            local endT = ((idx == #validEnts) and totalTris) or math.min(idx * trisPerEnt, totalTris)
+            
+            applyMeshToEntity(ent, start, endT, meshInfo, mat)
+        end
+    end
+
+    --[[
+        Client Event Handlers
+    ]]
+    hook.add("InputPressed", "", function(button)
+        if player() ~= owner() then return end
+        if button == KEY.X then 
+            net.start("Undo") 
+            net.send() 
+        end
+    end)
+
+    net.receive("send_ENT", function()
+        local main = net.readEntity()
+        local model = net.readString()
+        local matPath = net.readString()
+        local numChild = net.readUInt(8)
+        
+        local childs = {}
+        for i = 1, numChild do
+            local child = net.readEntity()
+            table.insert(childs, child)
+        end
+        
+        -- Apply meshes with delay to ensure entities are ready
+        timer.simple(Config.MESH_APPLY_DELAY, function()
+            applyMeshesToEntities(main, childs, model, matPath)
+        end)
+    end)
+end
